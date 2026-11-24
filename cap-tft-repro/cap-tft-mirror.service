@@ -1,0 +1,12 @@
+[Unit]
+Description=Mirror internal screen (fb0) to Cap TFT (spidev)
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cap-tft-mirror
+Restart=always
+RestartSec=2
+User=pi
+
+[Install]
+WantedBy=multi-user.target

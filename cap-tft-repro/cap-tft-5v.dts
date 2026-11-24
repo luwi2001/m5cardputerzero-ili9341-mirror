@@ -1,0 +1,13 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712\0brcm,bcm2711\0brcm,bcm2837\0brcm,bcm2836\0brcm,bcm2835";
+
+	fragment@0 {
+		target = <&ext_5v_out>;
+		__overlay__ {
+			default-state = "on";
+		};
+	};
+};

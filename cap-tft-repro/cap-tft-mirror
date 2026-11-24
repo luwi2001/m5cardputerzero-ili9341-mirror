@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Mirror internal screen /dev/fb0 (320x170 RGB565) to Cap TFT V2 (ILI9341)
+via spidev0.1 (DC=GPIO22, RES=GPIO26). Panel RAM is landscape 320x240;
+image is pasted 1:1 centered vertically (35px black bars top/bottom).
+
+Tunables in /etc/default/cap-tft-mirror: MADCTL, TRANSFORM, INVERT, SWAP, SPEED.
+"""
+import mmap, os, subprocess, time
+from array import array
+import spidev
+from PIL import Image
+
+DC, RES = 22, 26
+SPEED = 16000000
+MADCTL = 0x40                      # MX, no BGR, landscape RAM scan
+INVERT = 0                         # send INVON; 0 sends INVOFF
+SWAP = 1                           # byteswap RGB565 before push
+FPS = 10
+SRC = "/dev/fb0"
+TRANSFORM = Image.ROTATE_180       # panel ignores MY; flip in software
+
+_cfg = "/etc/default/cap-tft-mirror"
+if os.path.exists(_cfg):
+    for line in open(_cfg):
+        line = line.strip()
+        if line.startswith("MADCTL=0x"):
+            MADCTL = int(line.split("=", 1)[1], 16)
+        elif line.startswith("TRANSFORM="):
+            TRANSFORM = getattr(Image, line.split("=", 1)[1].strip(), None)
+        elif line.startswith("INVERT="):
+            INVERT = int(line.split("=", 1)[1])
+        elif line.startswith("SWAP="):
+            SWAP = int(line.split("=", 1)[1])
+        elif line.startswith("SPEED="):
+            SPEED = int(line.split("=", 1)[1])
+
+def gpio(pin, level):
+    subprocess.run(["pinctrl", "set", str(pin), "op", "dh" if level else "dl"],
+                   check=True, capture_output=True)
+
+def lcd_init(spi):
+    for p in (DC, RES):
+        subprocess.run(["pinctrl", "set", str(p), "op", "dl"], check=True, capture_output=True)
+    def cmd(c, *data):
+        gpio(DC, 0); spi.writebytes([c])
+        if data: gpio(DC, 1); spi.writebytes(list(data))
+    gpio(RES, 0); time.sleep(0.05); gpio(RES, 1); time.sleep(0.15)
+    cmd(0x01); time.sleep(0.15)
+    cmd(0xC0, 0x23); cmd(0xC1, 0x10); cmd(0xC5, 0x3E, 0x28); cmd(0xC7, 0x86)
+    cmd(0x36, MADCTL)
+    cmd(0x3A, 0x55); cmd(0xB1, 0x00, 0x18)
+    cmd(0x21 if INVERT else 0x20)
+    cmd(0x11); time.sleep(0.15); cmd(0x29); time.sleep(0.05)
+    return cmd
+
+def main():
+    spi = spidev.SpiDev()
+    spi.open(0, 1)
+    spi.max_speed_hz = SPEED
+    spi.mode = 0
+    cmd = lcd_init(spi)
+
+    fd0 = os.open(SRC, os.O_RDONLY)
+    src = mmap.mmap(fd0, 320*170*2, mmap.MAP_SHARED, mmap.PROT_READ)
+
+    canvas = Image.new("I;16", (320, 240), 0)
+
+    def push(data):
+        cmd(0x2A, 0, 0, 1, 63)   # CASET 0..319
+        cmd(0x2B, 0, 0, 0, 239)  # PASET 0..239
+        gpio(DC, 0); spi.writebytes([0x2C]); gpio(DC, 1)
+        buf = array("H", data)
+        if SWAP:
+            buf.byteswap()       # panel wants big-endian RGB565
+        data = buf.tobytes()
+        for i in range(0, len(data), 4096):
+            spi.writebytes(data[i:i+4096])
+
+    last = None
+    while True:
+        raw = src[:]
+        if raw != last:
+            last = raw
+            im = Image.frombytes("I;16", (320, 170), raw, "raw", "I;16")
+            canvas.paste(0, (0, 0, 320, 240))
+            canvas.paste(im, (0, 35))
+            out = canvas.transpose(TRANSFORM) if TRANSFORM is not None else canvas
+            push(out.tobytes("raw", "I;16"))
+        time.sleep(1.0 / FPS)
+
+main()
